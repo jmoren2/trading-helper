@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trading Helper</title>
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#4f8ef7" stroke-width="2">
+    <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>
+  </svg>
+  <h1>Trading Helper</h1>
+</header>
+
+<div class="container">
+
+  <div class="controls">
+    <input id="tickerInput" type="text" value="BTC-USD" placeholder="e.g. BTC-USD, AAPL" />
+    <button id="analyzeBtn" onclick="runAnalysis()">Analyze</button>
+    <div class="spinner" id="spinner"></div>
+  </div>
+
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- Signal card -->
+  <div class="signal-card" id="signalCard">
+    <div>
+      <div class="label">Ticker</div>
+      <div class="value" id="signalTicker">—</div>
+    </div>
+    <div>
+      <div class="label">Current Regime</div>
+      <div class="value" id="signalState">—</div>
+    </div>
+    <div>
+      <div class="label">Signal</div>
+      <div id="signalBadge" class="badge">—</div>
+    </div>
+    <div>
+      <div class="label">Regime Mean Return</div>
+      <div class="value" id="signalMeanReturn">—</div>
+    </div>
+    <div>
+      <div class="label">Regime Volatility</div>
+      <div class="value" id="signalVolatility">—</div>
+    </div>
+  </div>
+
+  <!-- Chart -->
+  <div id="chart"></div>
+
+  <!-- Tables -->
+  <div class="tables">
+    <div class="table-card" id="summaryCard">
+      <h2>Regime Summary</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>State</th>
+            <th>Mean Return %</th>
+            <th>Volatility %</th>
+            <th>Count</th>
+            <th>Signal</th>
+          </tr>
+        </thead>
+        <tbody id="summaryBody"></tbody>
+      </table>
+    </div>
+
+    <div class="table-card" id="ohlcvCard">
+      <h2>Recent OHLCV (Hourly)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Open</th>
+            <th>High</th>
+            <th>Low</th>
+            <th>Close</th>
+            <th>Volume</th>
+          </tr>
+        </thead>
+        <tbody id="ohlcvBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let currentTicker = '';
+
+  async function runAnalysis() {
+    const ticker = document.getElementById('tickerInput').value.trim().toUpperCase();
+    if (!ticker) return;
+
+    currentTicker = ticker;
+    setLoading(true);
+    hideError();
+    hideResults();
+
+    try {
+      const res = await fetch(`/api/analyze?ticker=${encodeURIComponent(ticker)}`);
+      const data = await res.json();
+
+      if (data.error) {
+        showError(data.error);
+        return;
+      }
+
+      renderSignalCard(ticker, data);
+      renderChart(data.plotly_json);
+      renderSummaryTable(data.summary, data.current_state);
+      renderOhlcvTable(data.ohlcv_rows);
+      showResults();
+    } catch (err) {
+      showError('Failed to connect to server: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function renderSignalCard(ticker, data) {
+    const summary = data.summary;
+    const currentState = data.current_state;
+    const signal = data.signal;
+
+    const stateRow = summary.find(r => r.State === currentState);
+
+    document.getElementById('signalTicker').textContent = ticker;
+    document.getElementById('signalState').textContent = `State ${currentState}`;
+
+    const badge = document.getElementById('signalBadge');
+    badge.textContent = signal;
+    badge.className = 'badge ' + signal;
+
+    if (stateRow) {
+      const mr = stateRow.Mean_Return;
+      const vol = stateRow.Volatility;
+      document.getElementById('signalMeanReturn').textContent =
+        mr != null ? (mr >= 0 ? '+' : '') + mr.toFixed(4) + '%' : 'N/A';
+      document.getElementById('signalVolatility').textContent =
+        vol != null ? vol.toFixed(4) + '%' : 'N/A';
+    }
+  }
+
+  function renderChart(plotlyJson) {
+    const fig = JSON.parse(plotlyJson);
+    const chartDiv = document.getElementById('chart');
+    Plotly.react(chartDiv, fig.data, fig.layout, { responsive: true });
+  }
+
+  function renderSummaryTable(summary, currentState) {
+    // Determine top2 / bottom2 for signal display
+    const sorted = [...summary].sort((a, b) => a.Mean_Return - b.Mean_Return);
+    const bottom2 = new Set([sorted[0].State, sorted[1].State]);
+    const top2 = new Set([sorted[sorted.length - 1].State, sorted[sorted.length - 2].State]);
+
+    const tbody = document.getElementById('summaryBody');
+    tbody.innerHTML = '';
+    for (const row of summary) {
+      let sig;
+      if (top2.has(row.State)) sig = 'BUY';
+      else if (bottom2.has(row.State)) sig = 'SELL';
+      else sig = 'HOLD';
+
+      const isCurrent = row.State === currentState;
+      const tr = document.createElement('tr');
+      if (isCurrent) tr.style.background = 'rgba(79,142,247,0.08)';
+      tr.innerHTML = `
+        <td>${row.State}${isCurrent ? ' <span style="color:#4f8ef7;font-size:10px">▶ current</span>' : ''}</td>
+        <td style="color:${(row.Mean_Return ?? 0) >= 0 ? '#22c55e' : '#ef4444'}">${row.Mean_Return != null ? (row.Mean_Return >= 0 ? '+' : '') + row.Mean_Return.toFixed(4) : 'N/A'}</td>
+        <td>${row.Volatility != null ? row.Volatility.toFixed(4) : 'N/A'}</td>
+        <td>${row.Count.toLocaleString()}</td>
+        <td><span class="badge ${sig}" style="padding:2px 10px;font-size:11px">${sig}</span></td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderOhlcvTable(rows) {
+    const tbody = document.getElementById('ohlcvBody');
+    tbody.innerHTML = '';
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="color:#888;font-size:12px">${row.time}</td>
+        <td>${row.Open.toFixed(2)}</td>
+        <td>${row.High.toFixed(2)}</td>
+        <td>${row.Low.toFixed(2)}</td>
+        <td><strong>${row.Close.toFixed(2)}</strong></td>
+        <td style="color:#888">${Number(row.Volume).toLocaleString()}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function setLoading(on) {
+    document.getElementById('spinner').style.display = on ? 'block' : 'none';
+    document.getElementById('analyzeBtn').disabled = on;
+    document.getElementById('tickerInput').disabled = on;
+  }
+
+  function showError(msg) {
+    const box = document.getElementById('errorBox');
+    box.textContent = 'Error: ' + msg;
+    box.style.display = 'block';
+  }
+
+  function hideError() {
+    document.getElementById('errorBox').style.display = 'none';
+  }
+
+  function showResults() {
+    document.getElementById('signalCard').style.display = 'flex';
+    document.getElementById('chart').style.display = 'block';
+    document.getElementById('summaryCard').style.display = 'block';
+    document.getElementById('ohlcvCard').style.display = 'block';
+  }
+
+  function hideResults() {
+    document.getElementById('signalCard').style.display = 'none';
+    document.getElementById('chart').style.display = 'none';
+    document.getElementById('summaryCard').style.display = 'none';
+    document.getElementById('ohlcvCard').style.display = 'none';
+  }
+
+  // Auto-run on page load
+  window.addEventListener('load', () => runAnalysis());
+
+  // Allow Enter key to trigger analysis
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('tickerInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') runAnalysis();
+    });
+  });
+</script>
+
+</body>
+</html>

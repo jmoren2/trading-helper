@@ -1,0 +1,33 @@
+{
+  "BTC-USD": {
+    "sl": 3,
+    "tp": 15,
+    "leverage": 2.5,
+    "votes": 7,
+    "cooldown": 48
+  },
+  "__quick__": [
+    "BTC-USD",
+    "NVDA",
+    "HOOD",
+    "PLTR"
+  ],
+  "NVDA": {
+    "sl": 2,
+    "tp": 15,
+    "leverage": 2.5,
+    "votes": 8,
+    "cooldown": 48,
+    "interval": "1d",
+    "period": "5y"
+  },
+  "__recent__": [
+    "BTC-USD",
+    "HOOD",
+    "NVDA",
+    "PLTR",
+    "OSCR",
+    "OSR",
+    "INTL"
+  ]
+}
