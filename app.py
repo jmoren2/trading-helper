@@ -202,22 +202,28 @@ def get_research_scan(
     scan_interval: str,
     scan_period: str,
     min_votes: int,
+    skip_stage1: bool = False,
 ) -> tuple[list[dict], dict[str, float], list[tuple[str, str]]]:
     """
     Two-stage research scan.
     Stage 1: batch 5d price change for the full universe, take top_n movers.
-    Stage 2: run full HMM on each of top_n — returns ALL results, not just LONG.
-    Returns: results, stage1_changes (top_n slice), errors
+             Skipped when skip_stage1=True — all tickers go to Stage 2.
+    Stage 2: run full HMM on each candidate — returns ALL results, not just LONG.
+    Returns: results, stage1_changes (top_n slice, empty if skipped), errors
     """
     all_tickers = get_universe_tickers(list(universe_keys))
     if not all_tickers:
         return [], {}, []
 
-    # Stage 1 — rank by 5d momentum
-    changes = batch_5d_change(tuple(all_tickers))
-    sorted_tickers = sorted(changes, key=lambda t: changes[t], reverse=True)
-    top_tickers = sorted_tickers[:top_n]
-    stage1_changes = {t: changes[t] for t in top_tickers}
+    if skip_stage1:
+        top_tickers = all_tickers
+        stage1_changes = {}
+    else:
+        # Stage 1 — rank by 5d momentum
+        changes = batch_5d_change(tuple(all_tickers))
+        sorted_tickers = sorted(changes, key=lambda t: changes[t], reverse=True)
+        top_tickers = sorted_tickers[:top_n]
+        stage1_changes = {t: changes[t] for t in top_tickers}
 
     # Stage 2 — full HMM on top N
     results: list[dict] = []
@@ -832,8 +838,8 @@ with tab_scan:
 with tab_research:
     st.title("Research — Universe Scanner")
     st.caption(
-        "Stage 1: batch-downloads 5-day price data for the full selected universe to rank top movers. "
-        "Stage 2: runs full HMM analysis on only the top N. Shows tickers currently in a Bull regime."
+        "By default, Stage 1 pre-filters the universe to the top N tickers by 5-day momentum before running HMM. "
+        "Enable 'Scan all tickers' to skip the filter and run HMM on the full universe (slower)."
     )
 
     rc1, rc2, rc3, rc4 = st.columns([3, 1, 1, 1])
@@ -845,14 +851,19 @@ with tab_research:
         format_func=lambda k: UNIVERSE_LABELS[k],
         help=(
             "S&P 500 and NASDAQ 100 constituent lists are fetched from Wikipedia (cached 24h). "
-            "Crypto and ETF lists are hardcoded. Stage 1 batch-downloads all tickers; "
-            "Stage 2 HMM only runs on the top N by 5-day momentum."
+            "Crypto and ETF lists are hardcoded."
         ),
     )
+    _skip_stage1 = rc1.checkbox(
+        "Scan all tickers (skip 5d momentum filter)",
+        value=False,
+        help="When checked, Stage 1 is skipped and HMM runs on every ticker in the universe. Much slower.",
+    )
     _research_top_n = rc2.number_input(
-        "Top N (Stage 2)",
-        min_value=5, max_value=100, value=30, step=5,
-        help="After Stage 1 ranks all tickers by 5-day % change, only the top N get full HMM analysis.",
+        "Top N (Stage 1 filter)",
+        min_value=5, max_value=500, value=30, step=5,
+        disabled=_skip_stage1,
+        help="After Stage 1 ranks all tickers by 5-day % change, only the top N get full HMM analysis. Disabled when 'Scan all tickers' is checked.",
     )
     _RESEARCH_INTERVAL_OPTIONS = {
         "1d / 5y    (Daily, 5 years)":   ("1d", "5y"),
@@ -881,27 +892,39 @@ with tab_research:
             "interval":      _research_interval,
             "period":        _research_period,
             "min_votes":     _research_min_votes,
+            "skip_stage1":   _skip_stage1,
         }
 
     if "research_params" in st.session_state:
         _rp = st.session_state["research_params"]
         _universe_size = len(get_universe_tickers(list(_rp["universe_keys"])))
-        st.caption(
-            f"Universe: {_universe_size} tickers   "
-            f"Stage 2: top {_rp['top_n']} by 5d momentum   "
-            f"Interval: {_rp['interval']} / {_rp['period']}"
-        )
+        _skip = _rp.get("skip_stage1", False)
+        if _skip:
+            st.caption(
+                f"Universe: {_universe_size} tickers   "
+                f"Stage 1 filter: OFF (scanning all)   "
+                f"Interval: {_rp['interval']} / {_rp['period']}"
+            )
+            _spinner_msg = f"Running HMM on all {_universe_size} tickers — this may take a while ..."
+        else:
+            st.caption(
+                f"Universe: {_universe_size} tickers   "
+                f"Stage 1 filter: top {_rp['top_n']} by 5d momentum   "
+                f"Interval: {_rp['interval']} / {_rp['period']}"
+            )
+            _spinner_msg = (
+                f"Stage 1: batch-downloading {_universe_size} tickers ...  "
+                f"Stage 2: HMM on top {_rp['top_n']} ..."
+            )
 
-        with st.spinner(
-            f"Stage 1: batch-downloading {_universe_size} tickers ...  "
-            f"Stage 2: HMM on top {_rp['top_n']} ..."
-        ):
+        with st.spinner(_spinner_msg):
             _r_results, _r_stage1, _r_errors = get_research_scan(
                 universe_keys=_rp["universe_keys"],
                 top_n=_rp["top_n"],
                 scan_interval=_rp["interval"],
                 scan_period=_rp["period"],
                 min_votes=_rp["min_votes"],
+                skip_stage1=_skip,
             )
         st.session_state["research_results"] = _r_results
         st.session_state["research_stage1"] = _r_stage1
@@ -914,9 +937,9 @@ with tab_research:
 
         _long_count  = sum(1 for r in _r_results if r["is_long"])
         _entry_count = sum(1 for r in _r_results if r["entry_ready"])
-        st.subheader(
-            f"Top {len(_r_results)} movers — {_long_count} in Bull regime, {_entry_count} entry-ready"
-        )
+        _skip = st.session_state.get("research_params", {}).get("skip_stage1", False)
+        _subheader_prefix = f"All {len(_r_results)} tickers" if _skip else f"Top {len(_r_results)} movers"
+        st.subheader(f"{_subheader_prefix} — {_long_count} in Bull regime, {_entry_count} entry-ready")
 
         # Stage 1 debug
         if _r_stage1:
