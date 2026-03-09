@@ -228,75 +228,28 @@ div[data-testid="stRadio"] > div {
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_research_scan(
+def get_research_tickers(
     universe_keys: tuple[str, ...],
     top_n: int,
-    scan_interval: str,
-    scan_period: str,
-    min_votes: int,
-    skip_stage1: bool = False,
-) -> tuple[list[dict], dict[str, float], list[tuple[str, str]]]:
+    skip_stage1: bool,
+) -> tuple[list[str], dict[str, float]]:
     """
-    Two-stage research scan.
-    Stage 1: batch 5d price change for the full universe, take top_n movers.
-             Skipped when skip_stage1=True — all tickers go to Stage 2.
-    Stage 2: run full HMM on each candidate — returns ALL results, not just LONG.
-    Returns: results, stage1_changes (top_n slice, empty if skipped), errors
+    Stage 1 only: resolve universe and optionally filter to top N by 5d momentum.
+    Returns (tickers_to_scan, stage1_changes).
+    stage1_changes is empty when skip_stage1=True.
+    Individual HMM analysis is done in the UI loop so progress can be shown.
     """
     all_tickers = get_universe_tickers(list(universe_keys))
     if not all_tickers:
-        return [], {}, []
+        return [], {}
 
-    changes: dict[str, float] = {}
     if skip_stage1:
-        top_tickers = all_tickers
-        stage1_changes = {}
-    else:
-        # Stage 1 — rank by 5d momentum
-        changes = batch_5d_change(tuple(all_tickers))
-        sorted_tickers = sorted(changes, key=lambda t: changes[t], reverse=True)
-        top_tickers = sorted_tickers[:top_n]
-        stage1_changes = {t: changes[t] for t in top_tickers}
+        return all_tickers, {}
 
-    # Stage 2 — full HMM on top N
-    results: list[dict] = []
-    errors: list[tuple[str, str]] = []
-
-    for t in top_tickers:
-        try:
-            s_df, s_bull, s_bears, s_labels, _ = get_hmm_analysis(t, scan_interval, scan_period)
-            s_row = s_df.iloc[-1]
-            s_state = int(s_row["State"])
-            is_long = s_state == s_bull
-
-            votes_ready = not any(pd.isna(s_row.get(col)) for col in INDICATOR_COLS)
-            if votes_ready:
-                vote_results = count_votes(s_row)
-                votes_count = sum(p for _, p in vote_results)
-            else:
-                votes_count = None
-
-            entry_ready = is_long and votes_count is not None and votes_count >= min_votes
-
-            tail = 720 if scan_interval == "1h" else 30
-            close_series = s_df["Close"].tail(tail)
-
-            results.append({
-                "ticker":       t,
-                "is_long":      is_long,
-                "regime":       s_labels[s_state],
-                "votes":        votes_count,
-                "entry_ready":  entry_ready,
-                "price":        float(s_row["Close"]),
-                "change_5d":    changes.get(t, 0.0),
-                "close_series": close_series,
-            })
-        except Exception as e:
-            errors.append((t, str(e)))
-
-    # Sort: entry-ready first, then LONG, then by 5d change desc
-    results.sort(key=lambda r: (not r["entry_ready"], not r["is_long"], -r["change_5d"]))
-    return results, stage1_changes, errors
+    changes = batch_5d_change(tuple(all_tickers))
+    sorted_tickers = sorted(changes, key=lambda t: changes[t], reverse=True)
+    top_tickers = sorted_tickers[:top_n]
+    return top_tickers, {t: changes[t] for t in top_tickers}
 
 
 @st.cache_data(ttl=604800, show_spinner=False)
@@ -942,40 +895,64 @@ with tab_research:
             "skip_stage1":   _skip_stage1,
         }
 
-    if "research_params" in st.session_state:
+    if "research_params" in st.session_state and "research_results" not in st.session_state:
         _rp = st.session_state["research_params"]
-        _universe_size = len(get_universe_tickers(list(_rp["universe_keys"])))
         _skip = _rp.get("skip_stage1", False)
-        if _skip:
-            st.caption(
-                f"Universe: {_universe_size} tickers   "
-                f"Stage 1 filter: OFF (scanning all)   "
-                f"Interval: {_rp['interval']} / {_rp['period']}"
-            )
-            _spinner_msg = f"Running HMM on all {_universe_size} tickers — this may take a while ..."
-        else:
-            st.caption(
-                f"Universe: {_universe_size} tickers   "
-                f"Stage 1 filter: top {_rp['top_n']} by 5d momentum   "
-                f"Interval: {_rp['interval']} / {_rp['period']}"
-            )
-            _spinner_msg = (
-                f"Stage 1: batch-downloading {_universe_size} tickers ...  "
-                f"Stage 2: HMM on top {_rp['top_n']} ..."
+
+        # Stage 1: resolve ticker list
+        with st.spinner("Fetching universe tickers..."):
+            _top_tickers, _r_stage1 = get_research_tickers(
+                _rp["universe_keys"], _rp["top_n"], _skip,
             )
 
-        with st.spinner(_spinner_msg):
-            _r_results, _r_stage1, _r_errors = get_research_scan(
-                universe_keys=_rp["universe_keys"],
-                top_n=_rp["top_n"],
-                scan_interval=_rp["interval"],
-                scan_period=_rp["period"],
-                min_votes=_rp["min_votes"],
-                skip_stage1=_skip,
+        _universe_size = len(_top_tickers)
+        if _skip:
+            st.caption(f"Scanning all {_universe_size} tickers   Interval: {_rp['interval']} / {_rp['period']}")
+        else:
+            st.caption(f"Top {_universe_size} by 5d momentum   Interval: {_rp['interval']} / {_rp['period']}")
+
+        # Stage 2: HMM loop with progress bar
+        _r_results: list[dict] = []
+        _r_errors:  list[tuple[str, str]] = []
+        _progress = st.progress(0, text="Starting...")
+
+        for _i, _t in enumerate(_top_tickers):
+            _progress.progress(
+                (_i + 1) / max(len(_top_tickers), 1),
+                text=f"Analyzing {_t}  ({_i + 1} / {len(_top_tickers)})",
             )
+            try:
+                _s_df, _s_bull, _s_bears, _s_labels, _ = get_hmm_analysis(
+                    _t, _rp["interval"], _rp["period"]
+                )
+                _s_row   = _s_df.iloc[-1]
+                _s_state = int(_s_row["State"])
+                _is_long = _s_state == _s_bull
+
+                _votes_ready = not any(pd.isna(_s_row.get(col)) for col in INDICATOR_COLS)
+                _votes_count = sum(p for _, p in count_votes(_s_row)) if _votes_ready else None
+                _entry_ready = _is_long and _votes_count is not None and _votes_count >= _rp["min_votes"]
+
+                _tail = 720 if _rp["interval"] == "1h" else 30
+                _r_results.append({
+                    "ticker":       _t,
+                    "is_long":      _is_long,
+                    "regime":       _s_labels[_s_state],
+                    "votes":        _votes_count,
+                    "entry_ready":  _entry_ready,
+                    "price":        float(_s_row["Close"]),
+                    "change_5d":    _r_stage1.get(_t, 0.0),
+                    "close_series": _s_df["Close"].tail(_tail),
+                })
+            except Exception as _e:
+                _r_errors.append((_t, str(_e)))
+
+        _progress.empty()
+        _r_results.sort(key=lambda r: (not r["entry_ready"], not r["is_long"], -r["change_5d"]))
         st.session_state["research_results"] = _r_results
-        st.session_state["research_stage1"] = _r_stage1
-        st.session_state["research_errors"] = _r_errors
+        st.session_state["research_stage1"]  = _r_stage1
+        st.session_state["research_errors"]  = _r_errors
+        st.rerun()
 
     if "research_results" in st.session_state:
         _r_results = st.session_state["research_results"]
