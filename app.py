@@ -1,8 +1,10 @@
+import io
 import json
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 
@@ -90,39 +92,34 @@ UNIVERSE_LABELS: dict[str, str] = {
 }
 
 
+_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; trading-helper/1.0)"}
+
+
 def _scrape_wiki_tickers(url: str, min_rows: int = 50) -> list[str]:
     """
     Fetch ticker symbols from a Wikipedia index-constituents page.
-    Tries attrs id='constituents' first, then falls back to finding the largest
-    table that has a recognised ticker column and at least min_rows rows.
+    Uses requests with a User-Agent (Wikipedia blocks the default urllib UA).
+    Picks the largest table with a recognised ticker column and >= min_rows rows.
     Returns an empty list on any failure.
     """
     try:
-        # Preferred: pinned by table id
-        try:
-            tables = pd.read_html(url, attrs={"id": "constituents"})
-            t = tables[0]
-        except Exception:
-            tables = pd.read_html(url)
-            # Pick the largest table that contains a ticker-like column
-            candidates = []
-            for t in tables:
-                for col in ("Symbol", "Ticker", "Ticker symbol"):
-                    if col in t.columns and len(t) >= min_rows:
-                        candidates.append((len(t), col, t))
-                        break
-            if not candidates:
-                return []
-            _, _, t = max(candidates, key=lambda x: x[0])
-
-        for col in ("Symbol", "Ticker", "Ticker symbol"):
-            if col in t.columns:
-                return sorted(
-                    t[col].astype(str).str.replace(".", "-", regex=False).tolist()
-                )
+        html = requests.get(url, headers=_WIKI_HEADERS, timeout=15).text
+        tables = pd.read_html(io.StringIO(html))
+        candidates = []
+        for t in tables:
+            # Flatten MultiIndex columns if present
+            if isinstance(t.columns, pd.MultiIndex):
+                t.columns = [" ".join(str(c) for c in col).strip() for col in t.columns]
+            for col in ("Symbol", "Ticker", "Ticker symbol"):
+                if col in t.columns and len(t) >= min_rows:
+                    candidates.append((len(t), col, t))
+                    break
+        if not candidates:
+            return []
+        _, col, t = max(candidates, key=lambda x: x[0])
+        return sorted(t[col].astype(str).str.replace(".", "-", regex=False).tolist())
     except Exception:
-        pass
-    return []
+        return []
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
