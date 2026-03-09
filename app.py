@@ -215,6 +215,7 @@ def get_research_scan(
     if not all_tickers:
         return [], {}, []
 
+    changes: dict[str, float] = {}
     if skip_stage1:
         top_tickers = all_tickers
         stage1_changes = {}
