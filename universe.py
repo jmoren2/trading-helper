@@ -18,10 +18,12 @@ POPULAR_ETFS: list[str] = [
 ]
 
 UNIVERSE_LABELS: dict[str, str] = {
-    "sp500":  "S&P 500",
-    "ndx100": "NASDAQ 100",
-    "crypto": "Top 25 Crypto",
-    "etfs":   "Popular ETFs",
+    "sp500":   "S&P 500",
+    "ndx100":  "NASDAQ 100",
+    "sp400":   "S&P MidCap 400",
+    "sp600":   "S&P SmallCap 600",
+    "crypto":  "Top 25 Crypto",
+    "etfs":    "Popular ETFs",
 }
 
 
@@ -51,10 +53,36 @@ def get_ndx100_tickers() -> list[str]:
                 "AVGO", "ASML", "COST", "NFLX", "AMD", "ADBE", "QCOM", "INTC"]
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp400_tickers() -> list[str]:
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+            attrs={"id": "constituents"},
+        )
+        return sorted(tables[0]["Ticker"].str.replace(".", "-", regex=False).tolist())
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp600_tickers() -> list[str]:
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
+            attrs={"id": "constituents"},
+        )
+        return sorted(tables[0]["Ticker"].str.replace(".", "-", regex=False).tolist())
+    except Exception:
+        return []
+
+
 def get_universe_tickers(selected_keys: list[str]) -> list[str]:
     tickers: list[str] = []
     if "sp500"  in selected_keys: tickers += get_sp500_tickers()
     if "ndx100" in selected_keys: tickers += get_ndx100_tickers()
+    if "sp400"  in selected_keys: tickers += get_sp400_tickers()
+    if "sp600"  in selected_keys: tickers += get_sp600_tickers()
     if "crypto" in selected_keys: tickers += TOP_CRYPTO
     if "etfs"   in selected_keys: tickers += POPULAR_ETFS
     seen: set[str] = set()

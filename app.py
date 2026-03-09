@@ -83,6 +83,8 @@ POPULAR_ETFS: list[str] = [
 UNIVERSE_LABELS: dict[str, str] = {
     "sp500":  "S&P 500",
     "ndx100": "NASDAQ 100",
+    "sp400":  "S&P MidCap 400",
+    "sp600":  "S&P SmallCap 600",
     "crypto": "Top 25 Crypto",
     "etfs":   "Popular ETFs",
 }
@@ -130,10 +132,36 @@ def get_ndx100_tickers() -> list[str]:
     ]
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp400_tickers() -> list[str]:
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
+        for t in tables:
+            if "Ticker" in t.columns:
+                return sorted(t["Ticker"].str.replace(".", "-", regex=False).tolist())
+    except Exception:
+        pass
+    return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp600_tickers() -> list[str]:
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
+        for t in tables:
+            if "Ticker" in t.columns:
+                return sorted(t["Ticker"].str.replace(".", "-", regex=False).tolist())
+    except Exception:
+        pass
+    return []
+
+
 def get_universe_tickers(selected_keys: list[str]) -> list[str]:
     tickers: list[str] = []
     if "sp500"  in selected_keys: tickers += get_sp500_tickers()
     if "ndx100" in selected_keys: tickers += get_ndx100_tickers()
+    if "sp400"  in selected_keys: tickers += get_sp400_tickers()
+    if "sp600"  in selected_keys: tickers += get_sp600_tickers()
     if "crypto" in selected_keys: tickers += TOP_CRYPTO
     if "etfs"   in selected_keys: tickers += POPULAR_ETFS
     seen: set[str] = set()
@@ -265,6 +293,15 @@ def get_research_scan(
     # Sort: entry-ready first, then LONG, then by 5d change desc
     results.sort(key=lambda r: (not r["entry_ready"], not r["is_long"], -r["change_5d"]))
     return results, stage1_changes, errors
+
+
+@st.cache_data(ttl=604800, show_spinner=False)
+def get_company_name(ticker: str) -> str:
+    """Returns shortName from yfinance info, or empty string on failure. Cached 7 days."""
+    try:
+        return yf.Ticker(ticker).info.get("shortName", "")
+    except Exception:
+        return ""
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -589,7 +626,8 @@ tab_dash, tab_scan, tab_research, tab_opt, tab_guide = st.tabs(
 # ════════════════════════════════════════════════════════════════════════════
 with tab_dash:
     _dash_title_col, _dash_news_col = st.columns([6, 1])
-    _dash_title_col.title(f"Swing Trading — {ticker}")
+    _company = get_company_name(ticker)
+    _dash_title_col.title(f"Swing Trading — {ticker}" + (f" ({_company})" if _company else ""))
     _dash_news_col.link_button(
         "Yahoo News", f"https://finance.yahoo.com/quote/{ticker}/news",
         use_container_width=True,
@@ -821,7 +859,12 @@ with tab_scan:
                 _sig_md = "<span style='color:#888'>CASH</span>"
 
             _c1, _c2, _c3, _c4, _c5 = st.columns([1.5, 1, 2, 1, 1.5])
-            _c1.markdown(f"**{_r['Ticker']}**")
+            _scan_name = get_company_name(_r["Ticker"])
+            _c1.markdown(
+                f"**{_r['Ticker']}**"
+                + (f"<br><small style='color:#aaa'>{_scan_name}</small>" if _scan_name else ""),
+                unsafe_allow_html=True,
+            )
             _c2.markdown(_sig_md, unsafe_allow_html=True)
             _c3.caption(_r["Regime"])
             _c4.caption(f"Votes: {_votes_str}")
@@ -967,7 +1010,12 @@ with tab_research:
             _chg_color = "#22c55e" if _r["change_5d"] >= 0 else "#ef4444"
             _chg_sign  = "+" if _r["change_5d"] >= 0 else ""
 
-            _hc1.markdown(f"### {_r['ticker']}")
+            _res_name = get_company_name(_r["ticker"])
+            _hc1.markdown(
+                f"### {_r['ticker']}"
+                + (f"<br><small style='color:#aaa'>{_res_name}</small>" if _res_name else ""),
+                unsafe_allow_html=True,
+            )
             _hc2.markdown(_sig_md, unsafe_allow_html=True)
             _hc3.caption(_r["regime"])
             _hc4.caption(f"Votes: {_votes_str}")
