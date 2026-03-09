@@ -90,17 +90,45 @@ UNIVERSE_LABELS: dict[str, str] = {
 }
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_sp500_tickers() -> list[str]:
+def _scrape_wiki_tickers(url: str, min_rows: int = 50) -> list[str]:
+    """
+    Fetch ticker symbols from a Wikipedia index-constituents page.
+    Tries attrs id='constituents' first, then falls back to finding the largest
+    table that has a recognised ticker column and at least min_rows rows.
+    Returns an empty list on any failure.
+    """
     try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        # Find the table with a Symbol column
-        for t in tables:
-            if "Symbol" in t.columns:
-                return sorted(t["Symbol"].str.replace(".", "-", regex=False).tolist())
+        # Preferred: pinned by table id
+        try:
+            tables = pd.read_html(url, attrs={"id": "constituents"})
+            t = tables[0]
+        except Exception:
+            tables = pd.read_html(url)
+            # Pick the largest table that contains a ticker-like column
+            candidates = []
+            for t in tables:
+                for col in ("Symbol", "Ticker", "Ticker symbol"):
+                    if col in t.columns and len(t) >= min_rows:
+                        candidates.append((len(t), col, t))
+                        break
+            if not candidates:
+                return []
+            _, _, t = max(candidates, key=lambda x: x[0])
+
+        for col in ("Symbol", "Ticker", "Ticker symbol"):
+            if col in t.columns:
+                return sorted(
+                    t[col].astype(str).str.replace(".", "-", regex=False).tolist()
+                )
     except Exception:
         pass
-    return [
+    return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sp500_tickers() -> list[str]:
+    result = _scrape_wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+    return result or [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
         "JPM", "JNJ", "V", "PG", "MA", "HD", "CVX", "MRK", "ABBV", "PEP",
         "KO", "AVGO", "COST", "WMT", "DIS", "NFLX", "ADBE", "CRM", "AMD",
@@ -113,15 +141,8 @@ def get_sp500_tickers() -> list[str]:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_ndx100_tickers() -> list[str]:
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-        for t in tables:
-            for col in ("Ticker", "Symbol"):
-                if col in t.columns:
-                    return sorted(t[col].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        pass
-    return [
+    result = _scrape_wiki_tickers("https://en.wikipedia.org/wiki/Nasdaq-100")
+    return result or [
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AVGO",
         "ASML", "COST", "NFLX", "AMD", "ADBE", "QCOM", "INTC", "TXN",
         "CSCO", "CMCSA", "INTU", "AMGN", "HON", "SBUX", "MDLZ", "GILD",
@@ -134,26 +155,12 @@ def get_ndx100_tickers() -> list[str]:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp400_tickers() -> list[str]:
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
-        for t in tables:
-            if "Ticker" in t.columns:
-                return sorted(t["Ticker"].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        pass
-    return []
+    return _scrape_wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp600_tickers() -> list[str]:
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
-        for t in tables:
-            if "Ticker" in t.columns:
-                return sorted(t["Ticker"].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        pass
-    return []
+    return _scrape_wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
 
 
 def get_universe_tickers(selected_keys: list[str]) -> list[str]:
@@ -297,9 +304,10 @@ def get_research_scan(
 
 @st.cache_data(ttl=604800, show_spinner=False)
 def get_company_name(ticker: str) -> str:
-    """Returns shortName from yfinance info, or empty string on failure. Cached 7 days."""
+    """Returns company short name from yfinance, or empty string on failure. Cached 7 days."""
     try:
-        return yf.Ticker(ticker).info.get("shortName", "")
+        info = yf.Ticker(ticker).info
+        return info.get("shortName") or info.get("longName") or ""
     except Exception:
         return ""
 
@@ -860,11 +868,9 @@ with tab_scan:
 
             _c1, _c2, _c3, _c4, _c5 = st.columns([1.5, 1, 2, 1, 1.5])
             _scan_name = get_company_name(_r["Ticker"])
-            _c1.markdown(
-                f"**{_r['Ticker']}**"
-                + (f"<br><small style='color:#aaa'>{_scan_name}</small>" if _scan_name else ""),
-                unsafe_allow_html=True,
-            )
+            _c1.markdown(f"**{_r['Ticker']}**")
+            if _scan_name:
+                _c1.caption(_scan_name)
             _c2.markdown(_sig_md, unsafe_allow_html=True)
             _c3.caption(_r["Regime"])
             _c4.caption(f"Votes: {_votes_str}")
@@ -1011,11 +1017,9 @@ with tab_research:
             _chg_sign  = "+" if _r["change_5d"] >= 0 else ""
 
             _res_name = get_company_name(_r["ticker"])
-            _hc1.markdown(
-                f"### {_r['ticker']}"
-                + (f"<br><small style='color:#aaa'>{_res_name}</small>" if _res_name else ""),
-                unsafe_allow_html=True,
-            )
+            _hc1.markdown(f"### {_r['ticker']}")
+            if _res_name:
+                _hc1.caption(_res_name)
             _hc2.markdown(_sig_md, unsafe_allow_html=True)
             _hc3.caption(_r["regime"])
             _hc4.caption(f"Votes: {_votes_str}")

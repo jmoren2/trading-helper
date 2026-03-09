@@ -27,54 +27,61 @@ UNIVERSE_LABELS: dict[str, str] = {
 }
 
 
+def _scrape_wiki_tickers(url: str, min_rows: int = 50) -> list[str]:
+    try:
+        try:
+            tables = pd.read_html(url, attrs={"id": "constituents"})
+            t = tables[0]
+        except Exception:
+            tables = pd.read_html(url)
+            candidates = []
+            for t in tables:
+                for col in ("Symbol", "Ticker", "Ticker symbol"):
+                    if col in t.columns and len(t) >= min_rows:
+                        candidates.append((len(t), col, t))
+                        break
+            if not candidates:
+                return []
+            _, _, t = max(candidates, key=lambda x: x[0])
+
+        for col in ("Symbol", "Ticker", "Ticker symbol"):
+            if col in t.columns:
+                return sorted(
+                    t[col].astype(str).str.replace(".", "-", regex=False).tolist()
+                )
+    except Exception:
+        pass
+    return []
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp500_tickers() -> list[str]:
-    try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            attrs={"id": "constituents"},
-        )
-        return sorted(tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
-                "BRK-B", "JPM", "JNJ", "V", "PG", "MA", "HD", "CVX"]
+    return _scrape_wiki_tickers(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    ) or ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA",
+          "BRK-B", "JPM", "JNJ", "V", "PG", "MA", "HD", "CVX"]
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_ndx100_tickers() -> list[str]:
-    try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/Nasdaq-100",
-            attrs={"id": "constituents"},
-        )
-        return sorted(tables[0]["Ticker"].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        return ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
-                "AVGO", "ASML", "COST", "NFLX", "AMD", "ADBE", "QCOM", "INTC"]
+    return _scrape_wiki_tickers(
+        "https://en.wikipedia.org/wiki/Nasdaq-100"
+    ) or ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
+          "AVGO", "ASML", "COST", "NFLX", "AMD", "ADBE", "QCOM", "INTC"]
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp400_tickers() -> list[str]:
-    try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
-            attrs={"id": "constituents"},
-        )
-        return sorted(tables[0]["Ticker"].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        return []
+    return _scrape_wiki_tickers(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
+    )
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp600_tickers() -> list[str]:
-    try:
-        tables = pd.read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
-            attrs={"id": "constituents"},
-        )
-        return sorted(tables[0]["Ticker"].str.replace(".", "-", regex=False).tolist())
-    except Exception:
-        return []
+    return _scrape_wiki_tickers(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies"
+    )
 
 
 def get_universe_tickers(selected_keys: list[str]) -> list[str]:
