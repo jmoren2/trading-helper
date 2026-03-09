@@ -41,3 +41,4 @@ App is exposed on port `5050`.
 3. A `GaussianHMM` (7 states) is trained and states are labeled: **Bull Run**, **Bear**, **Crash**, **Sideways 1–N**
 4. Entry fires when the current bar is in the Bull Run regime **and** passes a configurable number of indicator votes (out of 8)
 5. Exit on Stop Loss, Take Profit, or regime flip to Bear/Crash
+6. Test4
