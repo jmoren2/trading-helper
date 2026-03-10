@@ -33,7 +33,7 @@ jobs:
         run: |
           PAYLOAD='{"ref":"refs/heads/main","repository":{"name":"trading-helper"}}'
           SIG="sha256=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $2}')"
-          curl -sf -X POST https://webhook.deadstockjosh.com \
+          curl -sf -X POST ${{ secrets.NAS_WEBHOOK_URL }} \
             -H "Content-Type: application/json" \
             -H "x-hub-signature-256: $SIG" \
             -d "$PAYLOAD"
