@@ -670,11 +670,22 @@ with tab_dash:
                    "LONG = all entry conditions are met — the model would open a trade.\n\n"
                    "CASH = sitting out. Either the regime isn't Bull Run, not enough votes pass, "
                    "or we're in the 48h cooldown after a recent exit.")
-    c2.metric("Regime", regime_name,
+    _persist = summary_df.loc[current_state, "Persistence"]
+    if _persist is not None and pd.notna(_persist):
+        _exp_bars = float(summary_df.loc[current_state, "Expected_Bars"])
+        _regime_delta = (f"{float(_persist) * 100:.0f}% it holds next bar  "
+                         f"(~{_exp_bars:.0f} bars typical)")
+    else:
+        _regime_delta = None
+    c2.metric("Regime", regime_name, _regime_delta, delta_color="off",
               help="The market state the HMM model detected for the most recent hourly candle.\n\n"
                    "Bull Run = historically the highest-returning regime. Only state that allows entries.\n\n"
                    "Bear = the lowest-expected-return regime. Any open trade exits immediately.\n\n"
-                   "Sideways 1-2 = neutral regimes with mixed returns. No action taken.")
+                   "Sideways 1-2 = neutral regimes with mixed returns. No action taken.\n\n"
+                   "The figure underneath is how often this regime was actually followed by itself "
+                   "over the walk-forward window, and the average run length that implies. It says "
+                   "how STICKY the regime is, not that the move will be profitable - measured on "
+                   "this data, more confident Bull Run readings went with weaker next-day returns.")
     c3.metric("Price", f"${float(current_row['Close']):,.2f}",
               help="Closing price of the most recent hourly candle from yfinance. "
                    "Not a live tick — typically 1-2 hours delayed depending on the exchange.")
@@ -780,7 +791,10 @@ with tab_dash:
         disp.index = [f"State {i} — {state_labels[i]}" for i in disp.index]
         disp["Mean Return %"] = (disp["Mean_Return"].astype(float) * 100).round(4)
         disp["Volatility %"] = (disp["Volatility"].astype(float) * 100).round(4)
-        disp = disp[["Mean Return %", "Volatility %", "Count"]].sort_values(
+        disp["Stays Next Bar %"] = (disp["Persistence"].astype(float) * 100).round(1)
+        disp["Typical Run (bars)"] = disp["Expected_Bars"].astype(float).round(1)
+        disp = disp[["Mean Return %", "Volatility %", "Count",
+                     "Stays Next Bar %", "Typical Run (bars)"]].sort_values(
             "Mean Return %", ascending=False
         )
         st.dataframe(disp, use_container_width=True)

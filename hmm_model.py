@@ -216,6 +216,23 @@ def train_hmm(df, n_components=None, train_end=None, step=None):
         "Count": grouped.size(),
     }).reindex(range(n_components))
     summary_df["Count"] = summary_df["Count"].fillna(0).astype(int)
+
+    # Persistence: P(same regime next bar), measured on the emitted regime sequence
+    # rather than read off the final model's transition matrix. The two disagree -
+    # the matrix describes the latent chain under one fit, while what the UI shows
+    # is the filtered argmax across ~REFITS models - and only this version matches
+    # the run lengths a user can actually see on the chart. Mean run is 1 / (1 - p).
+    cur, nxt = states[:-1], states[1:]
+    persistence = np.full(n_components, np.nan)
+    for state in range(n_components):
+        seen = cur == state
+        if seen.sum() >= 2:
+            persistence[state] = (nxt[seen] == state).mean()
+    summary_df["Persistence"] = persistence
+    with np.errstate(divide="ignore", invalid="ignore"):
+        summary_df["Expected_Bars"] = np.minimum(
+            1.0 / np.maximum(1.0 - persistence, 1e-3), 999.0
+        )
     summary_df.index.name = "State"
     summary_df.replace([np.nan, np.inf, -np.inf], None, inplace=True)
 
