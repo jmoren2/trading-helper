@@ -18,10 +18,10 @@ def load_presets() -> dict:
     return {}
 
 
-def save_preset(ticker, sl, tp, lev, votes, cool, interval="1h", period="730d"):
+def save_preset(ticker, sl, tp, lev, votes, cool, risk=2.0, interval="1h", period="730d"):
     presets = load_presets()
     presets[ticker] = {"sl": sl, "tp": tp, "leverage": lev, "votes": votes, "cooldown": cool,
-                       "interval": interval, "period": period}
+                       "risk": risk, "interval": interval, "period": period}
     with open(PRESETS_FILE, "w") as f:
         json.dump(presets, f, indent=2)
 
@@ -61,7 +61,7 @@ def add_recent_ticker(ticker: str, max_recent: int = 15):
 
 from backtester import INDICATOR_COLS, count_votes, grid_search, run_backtest
 from data_loader import load_data
-from hmm_model import train_hmm
+from hmm_model import N_COMPONENTS, train_hmm
 from indicators import add_indicators
 
 # ── Universe data (inlined to avoid working-directory import issues) ───────────
@@ -70,9 +70,9 @@ import yfinance as _yf
 TOP_CRYPTO: list[str] = [
     "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD",
     "DOGE-USD", "ADA-USD", "AVAX-USD", "LINK-USD", "DOT-USD",
-    "MATIC-USD", "UNI-USD", "LTC-USD", "BCH-USD", "ATOM-USD",
+    "POL28321-USD", "UNI7083-USD", "LTC-USD", "BCH-USD", "ATOM-USD",
     "XLM-USD", "ALGO-USD", "NEAR-USD", "ICP-USD", "FIL-USD",
-    "APT-USD", "ARB-USD", "OP-USD", "INJ-USD", "SUI20947-USD",
+    "APT21794-USD", "ARB-USD", "OP-USD", "INJ-USD", "SUI20947-USD",
 ]
 
 POPULAR_ETFS: list[str] = [
@@ -89,6 +89,7 @@ UNIVERSE_LABELS: dict[str, str] = {
     "sp600":  "S&P SmallCap 600",
     "crypto": "Top 25 Crypto",
     "etfs":   "Popular ETFs",
+    "liquid": "Liquid US Equities",
 }
 
 
@@ -122,10 +123,21 @@ def _scrape_wiki_tickers(url: str, min_rows: int = 50) -> list[str]:
         return []
 
 
+def _wiki_universe(url: str, fallback: list[str] | None = None) -> tuple[list[str], str]:
+    """Scrape constituents, reporting whether the live list was actually used.
+
+    Wikipedia moves these pages (it moved the Nasdaq-100 one), and a silent fall
+    back to a stale built-in list is worse than an empty result you can see.
+    """
+    result = _scrape_wiki_tickers(url)
+    if result:
+        return result, "live"
+    return (fallback or []), ("fallback" if fallback else "failed")
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_sp500_tickers() -> list[str]:
-    result = _scrape_wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-    return result or [
+def get_sp500_tickers() -> tuple[list[str], str]:
+    return _wiki_universe("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", [
         "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
         "JPM", "JNJ", "V", "PG", "MA", "HD", "CVX", "MRK", "ABBV", "PEP",
         "KO", "AVGO", "COST", "WMT", "DIS", "NFLX", "ADBE", "CRM", "AMD",
@@ -133,13 +145,13 @@ def get_sp500_tickers() -> list[str]:
         "UNH", "LLY", "TMO", "DHR", "AMGN", "GILD", "ISRG", "SYK", "MDT",
         "CAT", "DE", "HON", "MMM", "GE", "BA", "LMT", "RTX", "NOC",
         "XOM", "CVX", "COP", "SLB", "EOG", "PXD", "NEE", "DUK", "SO",
-    ]
+    ])
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_ndx100_tickers() -> list[str]:
-    result = _scrape_wiki_tickers("https://en.wikipedia.org/wiki/Nasdaq-100")
-    return result or [
+def get_ndx100_tickers() -> tuple[list[str], str]:
+    # The constituents table lives on its own page; /wiki/Nasdaq-100 no longer has it.
+    return _wiki_universe("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies", [
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AVGO",
         "ASML", "COST", "NFLX", "AMD", "ADBE", "QCOM", "INTC", "TXN",
         "CSCO", "CMCSA", "INTU", "AMGN", "HON", "SBUX", "MDLZ", "GILD",
@@ -147,43 +159,91 @@ def get_ndx100_tickers() -> list[str]:
         "PANW", "KLAC", "MELI", "MNST", "FTNT", "CTAS", "ADP", "ORLY",
         "PCAR", "CPRT", "KDP", "FAST", "DXCM", "ODFL", "ROST", "BIIB",
         "IDXX", "MRNA", "ZS", "CRWD", "DDOG", "ABNB", "COIN", "PLTR",
-    ]
+    ])
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_sp400_tickers() -> list[str]:
-    return _scrape_wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
+def get_sp400_tickers() -> tuple[list[str], str]:
+    return _wiki_universe("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_sp600_tickers() -> list[str]:
-    return _scrape_wiki_tickers("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
+def get_sp600_tickers() -> tuple[list[str], str]:
+    return _wiki_universe("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
 
 
-def get_universe_tickers(selected_keys: list[str]) -> list[str]:
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_liquid_tickers(limit: int = 300) -> tuple[list[str], str]:
+    """Most-traded US equities over $5, from Yahoo's screener.
+
+    Not tied to index membership, so it surfaces names the index lists never show,
+    and there is no HTML layout to go stale.
+    """
+    try:
+        from yfinance import EquityQuery as EQ
+        query = EQ("and", [
+            EQ("gt", ["dayvolume", 2_000_000]),
+            EQ("gt", ["intradayprice", 5]),
+            EQ("eq", ["region", "us"]),
+        ])
+        out: list[str] = []
+        for offset in range(0, limit, 100):
+            page = _yf.screen(query, size=100, offset=offset,
+                              sortField="dayvolume", sortAsc=False)
+            quotes = page.get("quotes", [])
+            if not quotes:
+                break
+            out += [q["symbol"] for q in quotes if q.get("symbol")]
+        return out[:limit], ("live" if out else "failed")
+    except Exception:
+        return [], "failed"
+
+
+def get_universe_tickers(selected_keys: list[str]) -> tuple[list[str], list[str]]:
+    """Resolve the selected universes. Also returns a warning per universe that
+    could not be fetched live, so a stale or empty list never passes unnoticed."""
+    sources = {
+        "sp500":  get_sp500_tickers,
+        "ndx100": get_ndx100_tickers,
+        "sp400":  get_sp400_tickers,
+        "sp600":  get_sp600_tickers,
+        "liquid": get_liquid_tickers,
+    }
     tickers: list[str] = []
-    if "sp500"  in selected_keys: tickers += get_sp500_tickers()
-    if "ndx100" in selected_keys: tickers += get_ndx100_tickers()
-    if "sp400"  in selected_keys: tickers += get_sp400_tickers()
-    if "sp600"  in selected_keys: tickers += get_sp600_tickers()
+    problems: list[str] = []
+    for key, fetch in sources.items():
+        if key not in selected_keys:
+            continue
+        names, status = fetch()
+        tickers += names
+        if status == "fallback":
+            problems.append(
+                f"{UNIVERSE_LABELS[key]}: live list unavailable, using a stale built-in "
+                f"fallback of {len(names)} names. Results will miss current members."
+            )
+        elif status == "failed":
+            problems.append(f"{UNIVERSE_LABELS[key]}: could not be fetched, contributed 0 tickers.")
     if "crypto" in selected_keys: tickers += TOP_CRYPTO
     if "etfs"   in selected_keys: tickers += POPULAR_ETFS
+
     seen: set[str] = set()
     result: list[str] = []
     for t in tickers:
         if t not in seen:
             seen.add(t)
             result.append(t)
-    return result
+    return result, problems
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def batch_5d_change(tickers: tuple[str, ...]) -> dict[str, float]:
+    """% change over the last 5 sessions. Needs >5 bars, so it asks for 10:
+    `period="5d"` returns 7 bars and first-to-last would be a 6-day change."""
     if not tickers:
         return {}
     try:
         raw = _yf.download(
-            list(tickers), period="5d", interval="1d",
+            list(tickers), period="10d", interval="1d",
             progress=False, auto_adjust=True,
         )
     except Exception:
@@ -197,18 +257,18 @@ def batch_5d_change(tickers: tuple[str, ...]) -> dict[str, float]:
         for ticker in tickers:
             try:
                 closes = close_df[ticker].dropna()
-                if len(closes) >= 2:
+                if len(closes) >= 6:
                     results[ticker] = float(
-                        (closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0] * 100
+                        (closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6] * 100
                     )
             except (KeyError, TypeError):
                 continue
     else:
         # Single ticker — raw["Close"] is a Series
         closes = raw["Close"].dropna()
-        if len(closes) >= 2:
+        if len(closes) >= 6:
             results[tickers[0]] = float(
-                (closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0] * 100
+                (closes.iloc[-1] - closes.iloc[-6]) / closes.iloc[-6] * 100
             )
 
     return results
@@ -232,24 +292,27 @@ def get_research_tickers(
     universe_keys: tuple[str, ...],
     top_n: int,
     skip_stage1: bool,
-) -> tuple[list[str], dict[str, float]]:
+) -> tuple[list[str], dict[str, float], list[str]]:
     """
-    Stage 1 only: resolve universe and optionally filter to top N by 5d momentum.
-    Returns (tickers_to_scan, stage1_changes).
+    Stage 1 only: resolve universe and optionally filter by 5d momentum.
+    Returns (candidates, stage1_changes, problems).
+
+    It hands back more candidates than `top_n`, because the strongest short-term
+    movers are often recent listings with too little history for the walk-forward
+    model. Stage 2 works down the list until it has `top_n` that actually analyse.
     stage1_changes is empty when skip_stage1=True.
-    Individual HMM analysis is done in the UI loop so progress can be shown.
     """
-    all_tickers = get_universe_tickers(list(universe_keys))
+    all_tickers, problems = get_universe_tickers(list(universe_keys))
     if not all_tickers:
-        return [], {}
+        return [], {}, problems
 
     if skip_stage1:
-        return all_tickers, {}
+        return all_tickers, {}, problems
 
     changes = batch_5d_change(tuple(all_tickers))
     sorted_tickers = sorted(changes, key=lambda t: changes[t], reverse=True)
-    top_tickers = sorted_tickers[:top_n]
-    return top_tickers, {t: changes[t] for t in top_tickers}
+    candidates = sorted_tickers[:top_n * 3]
+    return candidates, {t: changes[t] for t in candidates}, problems
 
 
 @st.cache_data(ttl=604800, show_spinner=False)
@@ -464,6 +527,7 @@ with st.sidebar:
             st.session_state["apply_lev"] = p["leverage"]
             st.session_state["apply_votes"] = p["votes"]
             st.session_state["apply_cool"] = p["cooldown"]
+            st.session_state["apply_risk"] = p.get("risk", 2.0)
             st.session_state["apply_interval"] = p.get("interval", "1h")
             st.session_state["apply_period"] = p.get("period", "730d")
             st.rerun()
@@ -479,13 +543,21 @@ with st.sidebar:
                         help="Exit the trade and lock in profit if price rises this much from entry. "
                              "Example: 20% TP on a $100 entry closes at $120. "
                              "Higher TP = bigger wins but fewer of them. "
-                             "Note: leverage multiplies this gain (e.g. 20% TP × 2x leverage = 40% account gain).") / 100
+                             "What this is worth to the account depends on position size, which comes from Risk per trade %.") / 100
     leverage = st.slider("Leverage", 1.0, 5.0,
                           st.session_state.get("apply_lev", 2.5), 0.5, key="lev_slider",
-                          help="Multiplier applied to your gains AND losses. "
-                               "2x leverage means a 10% price move = 20% account change. "
-                               "Higher leverage = higher reward but dramatically higher risk. "
-                               "At 3x leverage, a -33% price drop wipes your entire position.")
+                          help="Ceiling on position size, as a multiple of the account. "
+                               "Position size comes from Risk per trade %; this caps it so a tight stop "
+                               "cannot imply a position many times your capital.\n\n"
+                               "It only binds when the stop is tighter than (risk % / leverage).")
+    risk_pct = st.slider("Risk per trade %", 0.5, 100.0,
+                          st.session_state.get("apply_risk", 2.0), 0.5, key="risk_slider",
+                          help="How much of the account you lose if the stop loss is hit. "
+                               "Position size is worked out from this and your stop: risking 2% with a "
+                               "3% stop means a position worth about two thirds of the account.\n\n"
+                               "The Leverage slider is now a ceiling on that position, not a fixed multiplier.\n\n"
+                               "Set this to 100 to reproduce the old all-in behaviour - which is what turned "
+                               "a break-even signal into a large loss.") / 100
     votes_required = st.slider("Min Votes Required", 5, 8,
                                 st.session_state.get("apply_votes", 7), 1, key="votes_slider",
                                 help="How many of the 8 technical indicators must agree before entering a trade. "
@@ -525,6 +597,7 @@ with st.sidebar:
             lev=leverage,
             votes=votes_required,
             cool=cooldown,
+            risk=risk_pct * 100,
             interval=interval,
             period=period,
         )
@@ -551,7 +624,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(f"Data: {period} {interval} — yfinance")
-    st.caption("Model: GaussianHMM, 7 states")
+    st.caption(f"Model: GaussianHMM, {N_COMPONENTS} states, walk-forward")
 
 # ── Load HMM (cached) ─────────────────────────────────────────────────────────
 with st.spinner(f"Loading HMM analysis for {ticker} ..."):
@@ -565,7 +638,7 @@ with st.spinner(f"Loading HMM analysis for {ticker} ..."):
 trades_df, metrics, equity_series = run_backtest(
     df, bull_state, bear_crash_states,
     sl_pct=sl_pct, tp_pct=tp_pct, leverage=leverage,
-    votes_required=votes_required, cooldown_hours=cooldown,
+    votes_required=votes_required, cooldown_hours=cooldown, risk_pct=risk_pct,
 )
 
 current_row = df.iloc[-1]
@@ -600,8 +673,8 @@ with tab_dash:
     c2.metric("Regime", regime_name,
               help="The market state the HMM model detected for the most recent hourly candle.\n\n"
                    "Bull Run = historically the highest-returning regime. Only state that allows entries.\n\n"
-                   "Bear / Crash = the two worst-returning regimes. Any open trade exits immediately.\n\n"
-                   "Sideways 1-4 = neutral regimes with mixed returns. No action taken.")
+                   "Bear = the lowest-expected-return regime. Any open trade exits immediately.\n\n"
+                   "Sideways 1-2 = neutral regimes with mixed returns. No action taken.")
     c3.metric("Price", f"${float(current_row['Close']):,.2f}",
               help="Closing price of the most recent hourly candle from yfinance. "
                    "Not a live tick — typically 1-2 hours delayed depending on the exchange.")
@@ -642,23 +715,35 @@ with tab_dash:
                 )
 
     # Chart
-    st.subheader("Price Chart — Last 500 Hours")
-    st.caption("Background: green = Bull Run | red = Bear/Crash | grey = Neutral")
+    st.subheader(f"Price Chart — Last 500 {'Hours' if interval == '1h' else 'Days'}")
+    st.caption("Background: green = Bull Run | red = Bear | grey = Neutral")
     st.plotly_chart(make_price_chart(df, bull_state, bear_crash_states), width="stretch")
 
     # Backtest metrics
     st.subheader(f"Backtest Results  ({period} {interval}, $10k starting capital)")
+    st.caption(
+        f"Walk-forward window: {df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d} "
+        f"({len(df):,} bars). Earlier bars were used to fit the first model and are not tradeable."
+    )
+    if int(summary_df.loc[bull_state, "Count"]) == 0:
+        st.warning(
+            f"The model never identified a Bull Run regime for {ticker} in this window, so the "
+            "strategy never enters and the backtest below is empty. That is a model-fit failure on "
+            "this series, not a bearish signal - try the other interval before reading anything into it."
+        )
     m1, m2, m3, m4 = st.columns(4)
     pnl = metrics["Final Capital"] - 10_000
     pnl_str = f"-${abs(pnl):,.0f}" if pnl < 0 else f"+${pnl:,.0f}"
     m1.metric("Total Return", f"{metrics['Total Return %']:+.2f}%", pnl_str,
-              help="Total profit or loss over the entire 730-day backtest period, starting with $10,000.\n\n"
+              help="Total profit or loss over the walk-forward backtest window, starting with $10,000.\n\n"
                    "The dollar amount below shows the actual gain/loss in cash. "
-                   "This already includes the leverage multiplier.")
+                   "Each trade is sized so that hitting the stop costs Risk per trade % of the account.")
     m2.metric(
         "Alpha vs Buy & Hold",
         f"{metrics['Alpha vs B&H %']:+.2f}%",
         f"vs B&H {metrics['Buy & Hold Return %']:+.2f}%",
+        # Reference value, not a change - green/up here would read as "good" next to negative alpha.
+        delta_color="off",
         help="How much better or worse the strategy performed compared to simply buying BTC on day 1 and holding.\n\n"
              "Positive alpha = the strategy beat doing nothing. Negative = you'd have been better off just holding.\n\n"
              "The delta shows the buy & hold return for reference."
@@ -673,7 +758,7 @@ with tab_dash:
              "a strategy can still be profitable with a low win rate if the winning trades "
              "are much larger than the losing ones (high reward-to-risk ratio).\n\n"
              "With a tight stop loss and high leverage, losses are frequent but capped, "
-             "while wins (at 15% TP × 2.5x leverage) are large when they hit."
+             "while wins run to the take-profit target and are several times larger when they hit."
     )
     m4.metric(
         "Max Drawdown",
@@ -690,7 +775,7 @@ with tab_dash:
         use_container_width=True,
     )
 
-    with st.expander("Regime Summary (all 7 states)"):
+    with st.expander(f"Regime Summary (all {N_COMPONENTS} states)"):
         disp = summary_df.copy()
         disp.index = [f"State {i} — {state_labels[i]}" for i in disp.index]
         disp["Mean Return %"] = (disp["Mean_Return"].astype(float) * 100).round(4)
@@ -901,15 +986,16 @@ with tab_research:
 
         # Stage 1: resolve ticker list
         with st.spinner("Fetching universe tickers..."):
-            _top_tickers, _r_stage1 = get_research_tickers(
+            _top_tickers, _r_stage1, _r_problems = get_research_tickers(
                 _rp["universe_keys"], _rp["top_n"], _skip,
             )
+        st.session_state["research_problems"] = _r_problems
 
-        _universe_size = len(_top_tickers)
+        _target = len(_top_tickers) if _skip else min(_rp["top_n"], len(_top_tickers))
         if _skip:
-            st.caption(f"Scanning all {_universe_size} tickers   Interval: {_rp['interval']} / {_rp['period']}")
+            st.caption(f"Scanning all {len(_top_tickers)} tickers   Interval: {_rp['interval']} / {_rp['period']}")
         else:
-            st.caption(f"Top {_universe_size} by 5d momentum   Interval: {_rp['interval']} / {_rp['period']}")
+            st.caption(f"Top {_target} by 5d momentum   Interval: {_rp['interval']} / {_rp['period']}")
 
         # Stage 2: HMM loop with progress bar
         _r_results: list[dict] = []
@@ -917,9 +1003,11 @@ with tab_research:
         _progress = st.progress(0, text="Starting...")
 
         for _i, _t in enumerate(_top_tickers):
+            if len(_r_results) >= _target:
+                break
             _progress.progress(
-                (_i + 1) / max(len(_top_tickers), 1),
-                text=f"Analyzing {_t}  ({_i + 1} / {len(_top_tickers)})",
+                min(len(_r_results) / max(_target, 1), 1.0),
+                text=f"Analyzing {_t}  ({len(_r_results) + 1} / {_target})",
             )
             try:
                 _s_df, _s_bull, _s_bears, _s_labels, _ = get_hmm_analysis(
@@ -941,14 +1029,15 @@ with tab_research:
                     "votes":        _votes_count,
                     "entry_ready":  _entry_ready,
                     "price":        float(_s_row["Close"]),
-                    "change_5d":    _r_stage1.get(_t, 0.0),
+                    "change_5d":    _r_stage1.get(_t),
                     "close_series": _s_df["Close"].tail(_tail),
                 })
             except Exception as _e:
                 _r_errors.append((_t, str(_e)))
 
         _progress.empty()
-        _r_results.sort(key=lambda r: (not r["entry_ready"], not r["is_long"], -r["change_5d"]))
+        _r_results.sort(key=lambda r: (not r["entry_ready"], not r["is_long"],
+                                       -(r["change_5d"] if r["change_5d"] is not None else 0.0)))
         st.session_state["research_results"] = _r_results
         st.session_state["research_stage1"]  = _r_stage1
         st.session_state["research_errors"]  = _r_errors
@@ -958,6 +1047,9 @@ with tab_research:
         _r_results = st.session_state["research_results"]
         _r_stage1  = st.session_state.get("research_stage1", {})
         _r_errors  = st.session_state.get("research_errors", [])
+
+        for _p in st.session_state.get("research_problems", []):
+            st.warning(_p)
 
         _long_count  = sum(1 for r in _r_results if r["is_long"])
         _entry_count = sum(1 for r in _r_results if r["entry_ready"])
@@ -987,8 +1079,9 @@ with tab_research:
                 _sig_md = "<span style='color:#888'>CASH</span>"
 
             _votes_str = f"{_r['votes']}/8" if _r["votes"] is not None else "N/A"
-            _chg_color = "#22c55e" if _r["change_5d"] >= 0 else "#ef4444"
-            _chg_sign  = "+" if _r["change_5d"] >= 0 else ""
+            _chg = _r["change_5d"]
+            _chg_color = "#888" if _chg is None else ("#22c55e" if _chg >= 0 else "#ef4444")
+            _chg_str = "n/a (5d)" if _chg is None else f"{'+' if _chg >= 0 else ''}{_chg:.1f}% (5d)"
 
             _res_name = get_company_name(_r["ticker"])
             _hc1.markdown(f"### {_r['ticker']}")
@@ -998,7 +1091,7 @@ with tab_research:
             _hc3.caption(_r["regime"])
             _hc4.caption(f"Votes: {_votes_str}")
             _hc5.markdown(
-                f"<span style='color:{_chg_color}'>{_chg_sign}{_r['change_5d']:.1f}% (5d)</span>"
+                f"<span style='color:{_chg_color}'>{_chg_str}</span>"
                 f"<br><small style='color:#aaa'>${_r['price']:,.2f}</small>",
                 unsafe_allow_html=True,
             )
@@ -1046,7 +1139,7 @@ with tab_opt:
         "Take Profit %", [5, 10, 15, 20, 30, 40, 50],
         default=[10, 15, 20, 30],
         help="Values of take profit % to test. Each value means: exit and lock in gains if price rises this % from entry. "
-             "Remember leverage multiplies this — a 20% TP at 2x leverage = 40% account gain per winning trade."
+             "What it is worth to the account depends on Risk per trade %, not on this number alone."
     )
     lev_opts = o3.multiselect(
         "Leverage", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
@@ -1084,6 +1177,7 @@ with tab_opt:
             leverage_values=lev_opts,
             votes_values=votes_opts,
             cooldown_hours=cooldown,
+            risk_pct=risk_pct,
             progress_cb=update_progress,
         )
 
@@ -1145,9 +1239,14 @@ with tab_guide:
     st.markdown("""
 ### Honest caveats
 
-- **The backtest has look-ahead bias.** The HMM was trained on all available historical data, then tested on
-  the same data. In real life the model only knows what happened before today, which makes backtest
-  results optimistic.
+- **The backtest is walk-forward.** The HMM is fit on the oldest slice of history and refit on an
+  expanding window, and each bar's regime is inferred from that bar and earlier ones only. No trade
+  uses information that was not available at the time. The cost is that the oldest ~25% of history
+  is spent training and is not tradeable, so the backtest window is shorter than the data window.
+- **The model may still be too complex for the data.** Seven full-covariance states need far more
+  history than 5 years of daily bars provides. Watch the trade count and the Bull Run row in the
+  Regime Summary: if Bull Run has very few bars, the model has not found a usable bull regime for
+  that ticker and the signal should not be trusted.
 - **Poor backtest results mean no edge yet.** A negative total return or alpha means the current
   parameters did not outperform simply holding. Run the optimizer before trusting any signal.
 - **Data is 1-2 hours delayed.** yfinance does not provide real-time prices. This tool is for
@@ -1205,7 +1304,7 @@ to verify before acting. Everything else you can ignore for the day.
 Open the dashboard, hit **Refresh Data** in the sidebar, and check three things in order:
 
 **1. Regime (top of page)**
-- Bear or Crash → stop here. Stay flat.
+- Bear → stop here. Stay flat.
 - Sideways → no new entries. Watch for a potential regime shift.
 - Bull Run → continue.
 
@@ -1216,7 +1315,7 @@ Open the dashboard, hit **Refresh Data** in the sidebar, and check three things 
 
 **3. Chart — quick sanity check**
 - Is price below both the EMA 50 (orange) and EMA 200 (purple)? Be skeptical of any buy signal.
-- Are there large red background zones nearby? That indicates recent Bear/Crash regime activity.
+- Are there large red background zones nearby? That indicates recent Bear regime activity.
 """)
 
     with st.expander("Step 4 — If signal is LONG"):
@@ -1236,7 +1335,7 @@ Use the signal as *input to your judgment*, not a command.
         st.markdown("""
 Refresh the dashboard and check:
 
-- **Has the regime flipped to Bear or Crash?** → Exit the trade. This is the primary exit signal.
+- **Has the regime flipped to Bear?** → Exit the trade. This is the primary exit signal.
   Do not wait for your stop loss to be hit if the regime already turned negative.
 - **Are you near your stop loss or take profit?** The dashboard shows what *would have* happened
   in the backtest, but it does not manage live positions. Your broker orders handle the actual exit.
@@ -1259,9 +1358,10 @@ Refresh the dashboard and check:
     with col_a:
         st.markdown("""
 **HMM Regime**
-The Hidden Markov Model groups all historical price/volume behavior into 7 distinct market states.
-It automatically identifies which state has the best historical returns (Bull Run) and worst
-(Bear, Crash). The regime for each hour is color-coded on the chart background.
+The Hidden Markov Model groups price/volume behavior into 4 distinct market states, ranked by
+expected return: Bear, Sideways 1-2, Bull Run. It is refit as time moves forward and only ever
+sees past data, so the regime shown for a bar is one you could have known at that bar.
+The regime is color-coded on the chart background.
 
 **RSI — Relative Strength Index**
 Measures how fast price has been moving. 0-100 scale.
@@ -1308,7 +1408,7 @@ Above average volume on an up move = real buying pressure behind the move.
 | Regime = Bull Run, 7+ votes | All conditions aligned | Consider entering |
 | Regime = Bull Run, < 7 votes | Bullish but not confirmed | Watch, wait for more votes |
 | Regime = Sideways | No clear direction | Stay flat, no new entries |
-| Regime = Bear or Crash | Actively negative conditions | Exit any open position |
+| Regime = Bear | Lowest expected return | Exit any open position |
 | Price below EMA 200 | Long-term downtrend intact | Be very cautious with longs |
 | Win rate < 30% in backtest | Strategy losing more than winning | Re-run optimizer before using |
 | Negative alpha | Buy & hold beats the strategy | Consider just holding instead |

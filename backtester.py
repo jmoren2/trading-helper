@@ -23,6 +23,40 @@ def count_votes(row):
     ]
 
 
+def position_value(capital, risk_pct, sl_pct, leverage):
+    """Size a position so that hitting the stop costs `risk_pct` of the account.
+
+    `leverage` is a cap on exposure, not a fixed multiplier: a tight stop would
+    otherwise imply a position many times the account.
+    """
+    if sl_pct <= 0:
+        return capital * leverage
+    return min(capital * risk_pct / sl_pct, capital * leverage)
+
+
+def resolve_exit(row, entry_price, sl_pct, tp_pct, state, bear_crash_states):
+    """Find this bar's exit, if any, as (reason, fill price).
+
+    Stops and targets are intrabar, so they are checked against the bar's low and
+    high rather than its close - a stop order does not wait for the closing print.
+    A bar that gaps straight through a level fills at the open, not at the level.
+    A regime flip is only knowable at the close, so it ranks last.
+    """
+    stop_price = entry_price * (1 - sl_pct)
+    target_price = entry_price * (1 + tp_pct)
+    open_, high, low = float(row["Open"]), float(row["High"]), float(row["Low"])
+
+    # If a bar touches both, assume the stop came first - OHLC cannot say which
+    # did, and that is the pessimistic reading.
+    if low <= stop_price:
+        return "Stop Loss", min(open_, stop_price)
+    if high >= target_price:
+        return "Take Profit", max(open_, target_price)
+    if int(state) in bear_crash_states:
+        return "Regime Flip", float(row["Close"])
+    return None, None
+
+
 def run_backtest(
     df,
     bull_state,
@@ -33,12 +67,14 @@ def run_backtest(
     tp_pct=0.15,
     cooldown_hours=48,
     votes_required=7,
+    risk_pct=0.02,
 ):
     capital = float(initial_capital)
     in_position = False
     entry_price = None
     entry_time = None
     entry_reason = ""
+    entry_size = 0.0
     cooldown_until = None
 
     trades = []
@@ -51,27 +87,23 @@ def run_backtest(
         close = float(row["Close"])
 
         if in_position:
-            price_change = (close - entry_price) / entry_price
-            exit_reason = None
-
-            if int(row["State"]) in bear_crash_states:
-                exit_reason = "Regime Flip"
-            elif price_change <= -sl_pct:
-                exit_reason = "Stop Loss"
-            elif price_change >= tp_pct:
-                exit_reason = "Take Profit"
+            exit_reason, exit_price = resolve_exit(
+                row, entry_price, sl_pct, tp_pct, row["State"], bear_crash_states
+            )
 
             if exit_reason:
-                leveraged_return = price_change * leverage
-                pnl = capital * leveraged_return
+                price_change = (exit_price - entry_price) / entry_price
+                pnl = entry_size * price_change
                 capital = max(capital + pnl, 0.0)
                 trades.append({
                     "Entry Time": entry_time,
                     "Exit Time": ts,
                     "Entry Price": round(entry_price, 2),
-                    "Exit Price": round(close, 2),
+                    "Exit Price": round(exit_price, 2),
+                    "Position ($)": round(entry_size, 2),
                     "Price Change %": round(price_change * 100, 3),
-                    "Leveraged Return %": round(leveraged_return * 100, 3),
+                    "Account Return %": round(pnl / (capital - pnl) * 100, 3)
+                                        if capital - pnl > 0 else 0.0,
                     "PnL ($)": round(pnl, 2),
                     "Capital After ($)": round(capital, 2),
                     "Entry Reason": entry_reason,
@@ -96,6 +128,7 @@ def run_backtest(
                     in_position = True
                     entry_price = close
                     entry_time = ts
+                    entry_size = position_value(capital, risk_pct, sl_pct, leverage)
                     entry_reason = ", ".join(label for label, passed in vote_results if passed)
 
         equity_values[i] = capital
@@ -104,16 +137,17 @@ def run_backtest(
     if in_position:
         close = float(df["Close"].iloc[-1])
         price_change = (close - entry_price) / entry_price
-        leveraged_return = price_change * leverage
-        pnl = capital * leveraged_return
+        pnl = entry_size * price_change
         capital = max(capital + pnl, 0.0)
         trades.append({
             "Entry Time": entry_time,
             "Exit Time": df.index[-1],
             "Entry Price": round(entry_price, 2),
             "Exit Price": round(close, 2),
+            "Position ($)": round(entry_size, 2),
             "Price Change %": round(price_change * 100, 3),
-            "Leveraged Return %": round(leveraged_return * 100, 3),
+            "Account Return %": round(pnl / (capital - pnl) * 100, 3)
+                                if capital - pnl > 0 else 0.0,
             "PnL ($)": round(pnl, 2),
             "Capital After ($)": round(capital, 2),
             "Entry Reason": entry_reason,
@@ -122,7 +156,7 @@ def run_backtest(
 
     trades_df = pd.DataFrame(trades) if trades else pd.DataFrame(
         columns=["Entry Time", "Exit Time", "Entry Price", "Exit Price",
-                 "Price Change %", "Leveraged Return %", "PnL ($)",
+                 "Position ($)", "Price Change %", "Account Return %", "PnL ($)",
                  "Capital After ($)", "Entry Reason", "Exit Reason"]
     )
 
@@ -161,6 +195,7 @@ def grid_search(
     leverage_values,
     votes_values,
     cooldown_hours=48,
+    risk_pct=0.02,
     progress_cb=None,
 ):
     combos = list(itertools.product(sl_values, tp_values, leverage_values, votes_values))
@@ -177,6 +212,7 @@ def grid_search(
             leverage=lev,
             votes_required=votes,
             cooldown_hours=cooldown_hours,
+            risk_pct=risk_pct,
         )
 
         ret = metrics["Total Return %"]
